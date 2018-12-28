@@ -1,6 +1,8 @@
 #define BATT_NOW        "/sys/class/power_supply/BAT0/charge_now"
 #define BATT_FULL       "/sys/class/power_supply/BAT0/charge_full"
 #define BATT_STATUS       "/sys/class/power_supply/BAT0/status"
+#define ETH_CARFILE	"/sys/class/net/eth0/carrier"
+#define WLAN_CARFILE	"/sys/class/net/wlan0/carrier"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -10,82 +12,36 @@
 
 #include <X11/Xlib.h>
 
+static Display *dpy;
+
+char *
+smprintf(char *fmt, ...)
+{
+    va_list fmtargs;
+    char *ret;
+    int len;
+
+    va_start(fmtargs, fmt);
+    len = vsnprintf(NULL, 0, fmt, fmtargs);
+    va_end(fmtargs);
+
+    ret = malloc(++len);
+    if (ret == NULL) {
+        perror("malloc");
+        exit(1);
+    }
+
+    va_start(fmtargs, fmt);
+    vsnprintf(ret, len, fmt, fmtargs);
+    va_end(fmtargs);
+
+    return ret;
+}
+
 static void die(const char *errmsg)
 {
     fputs(errmsg, stderr);
     exit(EXIT_FAILURE);
-}
-int
-parse_netdev(unsigned long long int *receivedabs, unsigned long long int *sentabs)
-{
-    char buf[255];
-    char *datastart;
-    static int bufsize;
-    int rval;
-    FILE *devfd;
-    unsigned long long int receivedacc, sentacc;
-
-    bufsize = 255;
-    devfd = fopen("/proc/net/dev", "r");
-    rval = 1;
-
-    // Ignore the first two lines of the file
-    fgets(buf, bufsize, devfd);
-    fgets(buf, bufsize, devfd);
-
-    while (fgets(buf, bufsize, devfd)) {
-        if ((datastart = strstr(buf, "lo:")) == NULL) {
-            datastart = strstr(buf, ":");
-
-            // With thanks to the conky project at http://conky.sourceforge.net/
-            sscanf(datastart + 1, "%llu  %*d     %*d  %*d  %*d  %*d   %*d        %*d       %llu",\
-                   &receivedacc, &sentacc);
-            *receivedabs += receivedacc;
-            *sentabs += sentacc;
-            rval = 0;
-        }
-    }
-
-    fclose(devfd);
-    return rval;
-}
-
-void
-calculate_speed(char *speedstr, unsigned long long int newval, unsigned long long int oldval)
-{
-    double speed;
-    speed = (newval - oldval) / 1024.0;
-    if (speed > 1024.0) {
-        speed /= 1024.0;
-        sprintf(speedstr, "%.3f MB/s", speed);
-    } else {
-        sprintf(speedstr, "%.2f KB/s", speed);
-    }
-}
-
-char *
-get_netusage(unsigned long long int *rec, unsigned long long int *sent)
-{
-    unsigned long long int newrec, newsent;
-    newrec = newsent = 0;
-    char downspeedstr[15], upspeedstr[15];
-    static char retstr[42];
-    int retval;
-
-    retval = parse_netdev(&newrec, &newsent);
-    if (retval) {
-        fprintf(stdout, "Error when parsing /proc/net/dev file.\n");
-        exit(1);
-    }
-
-    calculate_speed(downspeedstr, newrec, *rec);
-    calculate_speed(upspeedstr, newsent, *sent);
-
-    sprintf(retstr, "down: %s up: %s", downspeedstr, upspeedstr);
-
-    *rec = newrec;
-    *sent = newsent;
-    return retstr;
 }
 
 static snd_mixer_t *alsainit(const char *card)
@@ -144,66 +100,86 @@ static char *gettime()
     return timestr;
 }
 
-int get_power()   
-{
-    FILE *fp = NULL;
+char *
+getbattery(){
     long lnum1, lnum2 = 0;
+    char *status = malloc(sizeof(char)*12);
+    char s = '?';
+    FILE *fp = NULL;
     if ((fp = fopen(BATT_NOW, "r"))) {
         fscanf(fp, "%ld\n", &lnum1);
         fclose(fp);
         fp = fopen(BATT_FULL, "r");
         fscanf(fp, "%ld\n", &lnum2);
         fclose(fp);
+        fp = fopen(BATT_STATUS, "r");
+        fscanf(fp, "%s\n", status);
+        fclose(fp);
+        if (strcmp(status,"Charging") == 0)
+            s = '+';
+        if (strcmp(status,"Discharging") == 0)
+            s = '-';
+        if (strcmp(status,"Full") == 0)
+            s = '=';
+        return smprintf("%c%ld%%", s,(lnum1/(lnum2/100)));
     }
-    return (lnum1 /(lnum2/100)); 
+    else return smprintf("");
+}
+char *network()
+{
+    FILE *fd;
+    if ((fd = fopen(WLAN_CARFILE, "r"))) {
+        if (fgetc(fd) == '1') {
+            fclose(fd);
+            return "<--->";
+		}
+		fclose(fd);
+    }
+	if ((fd = fopen(ETH_CARFILE, "r"))) {
+            if (fgetc(fd) == '1') {
+                fclose(fd);
+                return "[---]";
+            }
+            fclose(fd);
+	}
+	return "--/--";
 }
 
-char *
-getbat_status(){
-    FILE *fp = NULL;
-    char *status = malloc(sizeof(char)*12);
-    fp = fopen(BATT_STATUS, "r");
-    fscanf(fp, "%s\n", status);
-    fclose(fp);
-    if (strcmp(status,"Charging") == 0)
-                 return "+";
-             if (strcmp(status,"Discharging") == 0)
-                 return "-";
-             if (strcmp(status,"Full") == 0)
-                 return "=";
-             else
-                 return "n/a";
+void
+setstatus(char *str)
+{
+    XStoreName(dpy, DefaultRootWindow(dpy), str);
+    XSync(dpy, False);
 }
 
 int
 main(void) {
-    snd_mixer_t *alsa;
-    snd_mixer_elem_t *mixer;
-    char buf[100];
-    static Display *dpy;
-    char *netstats;
-    static unsigned long long int rec, sent;
-    if (!(dpy = XOpenDisplay(NULL)))
-        die("dstatus: cannot open display \n");
-    if (!(alsa = alsainit("default")))
-        die("dstatus: cannot initialize alsa\n");
-    if (!(mixer = alsamixer(alsa, "Master")))
-        die("dstatus: cannot get mixer\n");
+     snd_mixer_t *alsa;
+     snd_mixer_elem_t *mixer;
+     char *status;
+     char *bat;
+     char *netstat;
+     char *time;
+     if (!(alsa = alsainit("default")))
+             die("dstatus: cannot initialize alsa\n");
+     if (!(mixer = alsamixer(alsa, "Master")))
+         die("dstatus: cannot get mixer\n");
+     if (!(dpy = XOpenDisplay(NULL))) {
+         fprintf(stderr, "dwmstatus: cannot open display.\n");
+         return 1;
+     }
 
-    parse_netdev(&rec, &sent);
-    while(1)
-        {
-            
-            netstats = get_netusage(&rec, &sent);
-            snprintf(buf, sizeof(buf), "|N:%s|B:%d%s|V:%d%%%s|%s", netstats ,
-                     get_power(),getbat_status(),getvol(mixer), ismuted(mixer) ? " [off]" : "",gettime());
-
-            XStoreName(dpy, DefaultRootWindow(dpy), buf);
-            XSync(dpy, False);
-            snd_mixer_wait(alsa, 10000);
-            snd_mixer_handle_events(alsa);
-        }
-    alsaclose(alsa);
+     while(1){
+         netstat=network();
+         bat=getbattery();
+         time=gettime();
+         status = smprintf("|N:%s| B:%s |V:%d%%%s|%s",netstat,bat,getvol(mixer), ismuted(mixer) ? " [off]":"",time);
+         setstatus(status);
+         snd_mixer_wait(alsa, 10000);
+         snd_mixer_handle_events(alsa);
+         
+     }
+     alsaclose(alsa);
     XCloseDisplay(dpy);
     return 0;
 }
