@@ -159,7 +159,7 @@ main(void) {
      char *status;
      char *bat;
      char *netstat;
-     char *time;
+     char *time_c;
      if (!(alsa = alsainit("default")))
              die("dstatus: cannot initialize alsa\n");
      if (!(mixer = alsamixer(alsa, "Master")))
@@ -172,8 +172,8 @@ main(void) {
      while(1){
          netstat=network();
          bat=getbattery();
-         time=gettime();
-         status = smprintf("|N:%s| B:%s |V:%d%%%s|%s",netstat,bat,getvol(mixer), ismuted(mixer) ? " [off]":"",time);
+         time_c=gettime();
+         status = smprintf("|N:%s| B:%s |V:%d%%%s|%s",netstat,bat,getvol(mixer), ismuted(mixer) ? " [off]":"",time_c);
          setstatus(status);
          snd_mixer_wait(alsa, 10000);
          snd_mixer_handle_events(alsa);
